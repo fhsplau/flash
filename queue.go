@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
@@ -14,20 +15,24 @@ type node struct {
 	next   *node
 	inChan <-chan interface{}
 	lock   *sync.Mutex
-	wg     *sync.WaitGroup
 	size   int
+	ctx    context.Context
 }
 
 func (n *node) start() {
-	n.wg.Add(1)
 	go func() {
-		defer n.wg.Done()
 		for {
 			select {
 			case el := <-n.inChan:
+				tmp := n.el
 				n.lock.Lock()
 				n.push(el)
+				if n.next.el != tmp {
+					log.Fatal("something went wrong!")
+				}
 				n.lock.Unlock()
+			case <-n.ctx.Done():
+				return
 			}
 		}
 	}()
@@ -41,8 +46,8 @@ func (n *node) push(el interface{}) {
 		lock:   prev.lock,
 		inChan: prev.inChan,
 		id:     prev.id,
-		wg:     prev.wg,
 		size:   prev.size + 1,
+		ctx:    prev.ctx,
 	}
 
 	*n = nn
@@ -73,7 +78,6 @@ func (n *node) pullBulk(i int) []interface{} {
 
 func (n node) String() string {
 	end := "nil"
-	var list string
 	next := &n
 
 	if next.el == nil {
@@ -81,18 +85,18 @@ func (n node) String() string {
 	}
 
 	for next != nil {
-		list = fmt.Sprintf("%s%d -> ", list, next.el)
+		fmt.Printf("%d -> ", next.el)
 		next = next.next
 	}
+	fmt.Println(end)
 
-	return list + end
+	return ""
 }
 
 type queue struct {
 	name   string
 	nodes  []chan<- interface{}
 	fnodes []*node
-	wg     *sync.WaitGroup
 	lock   *sync.Mutex
 	rand   *rand.Rand
 }
@@ -110,7 +114,7 @@ func (q *queue) size() int {
 	return s
 }
 
-func newQueue(name string, c int, wg *sync.WaitGroup) queue {
+func newQueue(ctx context.Context, name string, c int) queue {
 	nodes := make([]chan<- interface{}, c)
 	fnodes := make([]*node, c)
 	s := rand.NewSource(time.Now().UnixNano())
@@ -121,7 +125,7 @@ func newQueue(name string, c int, wg *sync.WaitGroup) queue {
 			id:     fmt.Sprint(name, i),
 			inChan: ch,
 			lock:   &sync.Mutex{},
-			wg:     wg,
+			ctx:    ctx,
 		}
 		n.start()
 		nodes[i] = ch
@@ -135,19 +139,18 @@ func newQueue(name string, c int, wg *sync.WaitGroup) queue {
 	}
 }
 
-func run(c int) {
+func run(c int, duration time.Duration) {
 	s1 := rand.NewSource(time.Now().UnixNano())
 	r1 := rand.New(s1)
-	var wg sync.WaitGroup
 	m := sync.Mutex{}
 	var n int
+	ctx, f := context.WithTimeout(context.Background(), duration)
+	defer f()
 
-	q := newQueue("test", c, &wg)
+	q := newQueue(ctx, "test", c)
 
 	for i := 0; i < 3; i++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			for {
 				select {
 				case <-time.After(time.Duration(100) * time.Microsecond):
@@ -156,29 +159,29 @@ func run(c int) {
 					m.Lock()
 					n++
 					m.Unlock()
+				case <-ctx.Done():
+					return
 				}
 			}
 
 		}()
 	}
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		for {
 			select {
 			case <-time.After(5 * time.Second):
 				log.Printf("sent: %d, recived: %d", n, q.size())
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
 
-	<-time.After(10 * time.Second)
-	fmt.Println(n)
-	fmt.Println(q.size())
-	fmt.Println(q.fnodes[0])
+	<-ctx.Done()
+	log.Printf("sent: %d, recived: %d", n, q.size())
 }
 
 func main() {
-	run(1)
+	run(1, time.Duration(20)*time.Second)
 }
